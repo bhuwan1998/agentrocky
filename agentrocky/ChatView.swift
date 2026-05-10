@@ -213,6 +213,16 @@ struct ChatView: View {
             Text("Changes apply immediately.")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.green.opacity(0.46))
+
+            Divider().background(Color.green.opacity(0.2))
+
+            Toggle(isOn: $session.isSpeechEnabled) {
+                Text("Voice")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.green.opacity(0.58))
+            }
+            .toggleStyle(.switch)
+            .frame(width: 220, alignment: .leading)
         }
         .padding(14)
         .frame(width: 260)

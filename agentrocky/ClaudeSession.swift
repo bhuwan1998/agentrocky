@@ -6,6 +6,7 @@
 import Foundation
 import Combine
 import Darwin
+import AVFoundation
 
 enum AgentProvider: String, CaseIterable, Identifiable {
     case claude = "Claude"
@@ -81,6 +82,7 @@ class AgentSession: ObservableObject {
     @Published var provider: AgentProvider
     @Published var model: String
     @Published var thinking: AgentThinking = .high
+    @Published var isSpeechEnabled: Bool = true
 
     let workingDirectory: String
 
@@ -89,6 +91,7 @@ class AgentSession: ObservableObject {
     private var readBuffer = Data()
     private var conversationHistory: [ConversationTurn] = []
     private let queue = DispatchQueue(label: "rocky.session", qos: .userInitiated)
+    private let synthesizer = AVSpeechSynthesizer()
 
     struct OutputLine: Identifiable {
         let id = UUID()
@@ -132,6 +135,7 @@ class AgentSession: ObservableObject {
 
     func newSession() {
         stopActiveProcess()
+        synthesizer.stopSpeaking(at: .immediate)
         readBuffer.removeAll()
         conversationHistory.removeAll()
         isRunning = false
@@ -685,8 +689,29 @@ class AgentSession: ObservableObject {
 
     private func append(_ text: String, kind: OutputLine.Kind) {
         DispatchQueue.main.async { [weak self] in
-            self?.lines.append(OutputLine(text: text, kind: kind))
+            guard let self else { return }
+            self.lines.append(OutputLine(text: text, kind: kind))
+            if kind == .text, self.isSpeechEnabled, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.speak(text)
+            }
         }
+    }
+
+    private func speak(_ text: String) {
+        // Strip "provider: " prefix added for display (e.g. "opencode: hello")
+        let clean: String
+        if let colonRange = text.range(of: ": ") {
+            clean = String(text[colonRange.upperBound...])
+        } else {
+            clean = text
+        }
+        let trimmed = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let utterance = AVSpeechUtterance(string: trimmed)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        synthesizer.speak(utterance)
     }
 
     private func remember(role: String, text: String) {
