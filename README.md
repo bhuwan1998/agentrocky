@@ -37,6 +37,8 @@ Rocky walks back and forth along the top of your Dock. Click him to open a retro
     - `/opt/homebrew/bin/opencode`
     - `/usr/local/bin/opencode`
     - `/usr/bin/opencode`
+  - The default model is **Big Pickle** (`opencode/big-pickle`) — a free model available through [OpenCode Zen](https://opencode.ai/docs/zen/). Run `opencode auth login` and connect to OpenCode Zen to use it.
+  - **GitHub Copilot** subscribers (base plan and above) can use `github-copilot/claude-sonnet-4-6` — run `opencode auth login` and select GitHub Copilot to authenticate via OAuth.
   - **[Codex CLI](https://openai.com/codex)** at one of:
     - `~/.local/bin/codex`
     - `~/.npm-global/bin/codex`

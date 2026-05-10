@@ -33,7 +33,7 @@ enum AgentProvider: String, CaseIterable, Identifiable {
         switch self {
         case .claude: return "sonnet"
         case .codex: return "gpt-5.5"
-        case .opencode: return "anthropic/claude-sonnet-4-5"
+        case .opencode: return "opencode/big-pickle"
         }
     }
 
@@ -45,6 +45,8 @@ enum AgentProvider: String, CaseIterable, Identifiable {
             return ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark"]
         case .opencode:
             return [
+                "opencode/big-pickle",
+                "github-copilot/claude-sonnet-4-6",
                 "anthropic/claude-sonnet-4-5",
                 "anthropic/claude-opus-4-5",
                 "openai/gpt-4o",
