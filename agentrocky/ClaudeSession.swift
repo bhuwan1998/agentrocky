@@ -628,65 +628,36 @@ class AgentSession: ObservableObject {
         }
 
         let type = (json["type"] as? String ?? "").lowercased()
+        let part = json["part"] as? [String: Any] ?? [:]
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             switch type {
             case "text":
-                if let text = json["text"] as? String,
+                // Real schema: {"type":"text","part":{"type":"text","text":"..."}}
+                if let text = part["text"] as? String,
                    !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.remember(role: "assistant", text: text)
                     self.append("opencode: \(text)", kind: .text)
                 }
 
-            case "tool":
-                let toolName = json["tool"] as? String ?? json["name"] as? String ?? "tool"
-                let input = json["input"] as? [String: Any] ?? [:]
-                let detail: String
-                if let cmd = input["command"] as? String { detail = cmd }
-                else if let path = input["path"] as? String { detail = path }
-                else if let desc = input["description"] as? String { detail = desc }
-                else { detail = input.keys.joined(separator: ", ") }
+            case "tool_use":
+                // Real schema: {"type":"tool_use","part":{"tool":"read","state":{"input":{...}}}}
+                let toolName = part["tool"] as? String ?? "tool"
+                let state = part["state"] as? [String: Any] ?? [:]
+                let input = state["input"] as? [String: Any] ?? [:]
+                let detail = (input["command"] as? String)
+                    ?? (input["path"] as? String)
+                    ?? (input["description"] as? String)
+                    ?? input.keys.joined(separator: ", ")
                 self.append("[\(toolName)] \(detail)", kind: .tool)
 
-            case "assistant":
-                // Some opencode JSON formats nest content under "message"
-                if let message = json["message"] as? [String: Any],
-                   let content = message["content"] as? [[String: Any]] {
-                    for block in content {
-                        switch block["type"] as? String ?? "" {
-                        case "text":
-                            if let text = block["text"] as? String,
-                               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                self.remember(role: "assistant", text: text)
-                                self.append("opencode: \(text)", kind: .text)
-                            }
-                        case "tool_use":
-                            let name = block["name"] as? String ?? "tool"
-                            let input = block["input"] as? [String: Any] ?? [:]
-                            let detail = (input["command"] as? String)
-                                ?? (input["path"] as? String)
-                                ?? (input["description"] as? String)
-                                ?? input.keys.joined(separator: ", ")
-                            self.append("[\(name)] \(detail)", kind: .tool)
-                        default:
-                            break
-                        }
-                    }
-                } else {
-                    let text = self.extractText(from: json)
-                    if !text.isEmpty {
-                        self.remember(role: "assistant", text: text)
-                        self.append("opencode: \(text)", kind: .text)
-                    }
-                }
+            case "step_start", "step_finish":
+                // Lifecycle events — no display needed
+                break
 
             default:
-                // For any other event type, try to extract displayable text
-                let text = self.extractText(from: json)
-                if !text.isEmpty {
-                    self.append("opencode: \(text)", kind: .text)
-                }
+                break
             }
         }
     }
