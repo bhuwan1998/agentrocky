@@ -10,6 +10,7 @@ import Darwin
 enum AgentProvider: String, CaseIterable, Identifiable {
     case claude = "Claude"
     case codex = "Codex"
+    case opencode = "OpenCode"
 
     private static let defaultProviderKey = "rocky.defaultAgentProvider"
 
@@ -32,6 +33,7 @@ enum AgentProvider: String, CaseIterable, Identifiable {
         switch self {
         case .claude: return "sonnet"
         case .codex: return "gpt-5.5"
+        case .opencode: return "anthropic/claude-sonnet-4-5"
         }
     }
 
@@ -41,6 +43,13 @@ enum AgentProvider: String, CaseIterable, Identifiable {
             return ["sonnet", "opus", "claude-sonnet-4-6"]
         case .codex:
             return ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark"]
+        case .opencode:
+            return [
+                "anthropic/claude-sonnet-4-5",
+                "anthropic/claude-opus-4-5",
+                "openai/gpt-4o",
+                "google/gemini-2-5-pro",
+            ]
         }
     }
 
@@ -48,6 +57,7 @@ enum AgentProvider: String, CaseIterable, Identifiable {
         switch self {
         case .claude: return [.low, .medium, .high, .xhigh, .max]
         case .codex: return [.low, .medium, .high, .xhigh]
+        case .opencode: return [.low, .medium, .high, .xhigh, .max]
         }
     }
 }
@@ -113,6 +123,8 @@ class AgentSession: ObservableObject {
             sendClaude(prompt: prompt)
         case .codex:
             runCodex(prompt: prompt)
+        case .opencode:
+            runOpenCode(prompt: prompt)
         }
     }
 
@@ -151,6 +163,13 @@ class AgentSession: ObservableObject {
                 append("Codex ready. Rocky keeps conversation history.", kind: .system)
             } else {
                 append("codex binary not found - checked:\n" + codexSearchPaths().joined(separator: "\n"), kind: .error)
+            }
+        case .opencode:
+            isReady = findOpenCode() != nil
+            if isReady {
+                append("OpenCode ready. Rocky keeps conversation history.", kind: .system)
+            } else {
+                append("opencode binary not found - checked:\n" + openCodeSearchPaths().joined(separator: "\n"), kind: .error)
             }
         }
     }
@@ -503,6 +522,192 @@ class AgentSession: ObservableObject {
         return ""
     }
 
+    // MARK: - OpenCode
+
+    private func runOpenCode(prompt: String) {
+        guard let openCodePath = findOpenCode() else {
+            append("opencode binary not found - checked:\n" + openCodeSearchPaths().joined(separator: "\n"), kind: .error)
+            return
+        }
+
+        isRunning = true
+
+        let proc = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+
+        proc.executableURL = URL(fileURLWithPath: openCodePath)
+        proc.arguments = openCodeArguments(prompt: prompt)
+        proc.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
+        proc.environment = ProcessInfo.processInfo.environment
+        proc.standardOutput = stdoutPipe
+        proc.standardError = stderrPipe
+
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            self?.queue.async { self?.receiveOpenCode(data) }
+        }
+
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
+            let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            self?.append(trimmed, kind: .error)
+        }
+
+        proc.terminationHandler = { [weak self] p in
+            DispatchQueue.main.async {
+                guard let self, self.process === p else { return }
+                self.process = nil
+                self.isRunning = false
+                self.isReady = true
+                if p.terminationStatus == 0 {
+                    self.append("OpenCode done", kind: .system)
+                } else {
+                    self.append("OpenCode stopped (code \(p.terminationStatus))", kind: .error)
+                }
+            }
+        }
+
+        do {
+            process = proc
+            readBuffer.removeAll()
+            append("OpenCode running with model \(model)...", kind: .system)
+            try proc.run()
+        } catch {
+            process = nil
+            isRunning = false
+            append("Failed to launch opencode: \(error.localizedDescription)", kind: .error)
+        }
+    }
+
+    private func openCodeArguments(prompt: String) -> [String] {
+        var args = ["run", "--format", "json", "--dangerously-skip-permissions"]
+
+        if !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--model", model]
+        }
+
+        // Map thinking level to opencode's --variant flag
+        let variant: String
+        switch thinking {
+        case .low:    variant = "low"
+        case .medium: variant = "medium"
+        case .high:   variant = "high"
+        case .xhigh:  variant = "high"
+        case .max:    variant = "high"
+        }
+        args += ["--variant", variant]
+
+        args.append(openCodePrompt(for: prompt))
+        return args
+    }
+
+    private func receiveOpenCode(_ data: Data) {
+        readBuffer.append(data)
+        while let idx = readBuffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let lineData = readBuffer[readBuffer.startIndex..<idx]
+            readBuffer.removeSubrange(readBuffer.startIndex...idx)
+            guard let str = String(data: lineData, encoding: .utf8),
+                  !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
+            parseOpenCode(str)
+        }
+    }
+
+    private func parseOpenCode(_ raw: String) {
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            // Non-JSON lines (e.g. plain progress output) — ignore silently
+            return
+        }
+
+        let type = (json["type"] as? String ?? "").lowercased()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch type {
+            case "text":
+                if let text = json["text"] as? String,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.remember(role: "assistant", text: text)
+                    self.append("opencode: \(text)", kind: .text)
+                }
+
+            case "tool":
+                let toolName = json["tool"] as? String ?? json["name"] as? String ?? "tool"
+                let input = json["input"] as? [String: Any] ?? [:]
+                let detail: String
+                if let cmd = input["command"] as? String { detail = cmd }
+                else if let path = input["path"] as? String { detail = path }
+                else if let desc = input["description"] as? String { detail = desc }
+                else { detail = input.keys.joined(separator: ", ") }
+                self.append("[\(toolName)] \(detail)", kind: .tool)
+
+            case "assistant":
+                // Some opencode JSON formats nest content under "message"
+                if let message = json["message"] as? [String: Any],
+                   let content = message["content"] as? [[String: Any]] {
+                    for block in content {
+                        switch block["type"] as? String ?? "" {
+                        case "text":
+                            if let text = block["text"] as? String,
+                               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                self.remember(role: "assistant", text: text)
+                                self.append("opencode: \(text)", kind: .text)
+                            }
+                        case "tool_use":
+                            let name = block["name"] as? String ?? "tool"
+                            let input = block["input"] as? [String: Any] ?? [:]
+                            let detail = (input["command"] as? String)
+                                ?? (input["path"] as? String)
+                                ?? (input["description"] as? String)
+                                ?? input.keys.joined(separator: ", ")
+                            self.append("[\(name)] \(detail)", kind: .tool)
+                        default:
+                            break
+                        }
+                    }
+                } else {
+                    let text = self.extractText(from: json)
+                    if !text.isEmpty {
+                        self.remember(role: "assistant", text: text)
+                        self.append("opencode: \(text)", kind: .text)
+                    }
+                }
+
+            default:
+                // For any other event type, try to extract displayable text
+                let text = self.extractText(from: json)
+                if !text.isEmpty {
+                    self.append("opencode: \(text)", kind: .text)
+                }
+            }
+        }
+    }
+
+    private func openCodePrompt(for currentPrompt: String) -> String {
+        let priorTurns = conversationHistory.dropLast().suffix(12)
+        let history = priorTurns.map { "\($0.role): \($0.text)" }.joined(separator: "\n\n")
+
+        if history.isEmpty {
+            return currentPrompt
+        }
+
+        return """
+        Continue this conversation. Use the prior turns for context and answer the latest user message.
+
+        Prior conversation:
+        \(history)
+
+        Latest user message:
+        \(currentPrompt)
+        """
+    }
+
     // MARK: - Helpers
 
     private func append(_ text: String, kind: OutputLine.Kind) {
@@ -537,6 +742,10 @@ class AgentSession: ObservableObject {
         codexSearchPaths().first { FileManager.default.fileExists(atPath: $0) }
     }
 
+    private func findOpenCode() -> String? {
+        openCodeSearchPaths().first { FileManager.default.fileExists(atPath: $0) }
+    }
+
     private func claudeSearchPaths() -> [String] {
         let home = realHome
         return [
@@ -556,6 +765,17 @@ class AgentSession: ObservableObject {
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
             "/usr/bin/codex",
+        ]
+    }
+
+    private func openCodeSearchPaths() -> [String] {
+        let home = realHome
+        return [
+            "\(home)/.local/bin/opencode",
+            "\(home)/.npm-global/bin/opencode",
+            "/opt/homebrew/bin/opencode",
+            "/usr/local/bin/opencode",
+            "/usr/bin/opencode",
         ]
     }
 
